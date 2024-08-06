@@ -1,5 +1,5 @@
-import { isNotFoundError } from './not-found'
 import { isRedirectError } from './redirect'
+import { matchUIError } from '../../shared/lib/ui-error-types'
 
 /**
  * Returns true if the error is a navigation signal error. These errors are
@@ -7,5 +7,7 @@ import { isRedirectError } from './redirect'
  * render.
  */
 export function isNextRouterError(error: any): boolean {
-  return isRedirectError(error) || isNotFoundError(error)
+  return (
+    error && error.digest && (isRedirectError(error) || !!matchUIError(error))
+  )
 }

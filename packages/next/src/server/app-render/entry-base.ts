@@ -17,7 +17,6 @@ import {
   createDynamicallyTrackedSearchParams,
 } from '../../client/components/search-params'
 import * as serverHooks from '../../client/components/hooks-server-context'
-import { NotFoundBoundary } from '../../client/components/not-found-boundary'
 import { patchFetch as _patchFetch } from '../lib/patch-fetch'
 // not being used but needs to be included in the client manifest for /_not-found
 import '../../client/components/error-boundary'
@@ -29,6 +28,7 @@ import {
 } from '../../server/app-render/rsc/preloads'
 import { Postpone } from '../../server/app-render/rsc/postpone'
 import { taintObjectReference } from '../../server/app-render/rsc/taint'
+import { UIErrorsBoundary } from '../../client/components/ui-errors-boundaries'
 
 import * as React from 'react'
 import {
@@ -61,7 +61,7 @@ export {
   Postpone,
   taintObjectReference,
   ClientPageRoot,
-  NotFoundBoundary,
+  UIErrorsBoundary,
   patchFetch,
   createCacheScope,
   patchCacheScopeSupportIntoReact,

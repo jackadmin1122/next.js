@@ -52,7 +52,6 @@ import {
 } from '../../lib/metadata/metadata'
 import { withRequestStore } from '../async-storage/with-request-store'
 import { withStaticGenerationStore } from '../async-storage/with-static-generation-store'
-import { isNotFoundError } from '../../client/components/not-found'
 import {
   getURLFromRedirectError,
   isRedirectError,
@@ -127,6 +126,12 @@ import type { RequestErrorContext } from '../instrumentation/types'
 import { getServerActionRequestMetadata } from '../lib/server-action-request-meta'
 import { createInitialRouterState } from '../../client/components/router-reducer/create-initial-router-state'
 import { createMutableActionQueue } from '../../shared/lib/router/action-queue'
+import {
+  getUIErrorHelperName,
+  getUIErrorStatusCode,
+  matchUIError,
+  uiErrorStatusCodes,
+} from '../../shared/lib/ui-error-types'
 
 export type GetDynamicParamFromSegment = (
   // [slug] / [[slug]] / [...slug]
@@ -1348,8 +1353,9 @@ async function renderToHTMLOrFlightImpl(
           throw err
         }
 
-        if (isNotFoundError(err)) {
-          res.statusCode = 404
+        const uiErrorType = matchUIError(err)
+        if (uiErrorType) {
+          res.statusCode = getUIErrorStatusCode(uiErrorType)
         }
         let hasRedirectError = false
         if (isRedirectError(err)) {
@@ -1371,12 +1377,17 @@ async function renderToHTMLOrFlightImpl(
           setHeader('Location', redirectUrl)
         }
 
-        const is404 = ctx.res.statusCode === 404
-        if (!is404 && !hasRedirectError && !shouldBailoutToCSR) {
+        if (
+          !uiErrorStatusCodes.includes(ctx.res.statusCode || 0) &&
+          !hasRedirectError &&
+          !shouldBailoutToCSR
+        ) {
           res.statusCode = 500
         }
 
-        const errorType = is404
+        // TODO(@panteliselef): Maybe create specific type for `forbidden`
+        // This is probably is used to generate metadata.
+        const errorType = uiErrorStatusCodes.includes(ctx.res.statusCode || 0)
           ? 'not-found'
           : hasRedirectError
             ? 'redirect'
@@ -1452,13 +1463,13 @@ async function renderToHTMLOrFlightImpl(
             }),
           }
         } catch (finalErr: any) {
-          if (
-            process.env.NODE_ENV === 'development' &&
-            isNotFoundError(finalErr)
-          ) {
-            const bailOnNotFound: typeof import('../../client/components/dev-root-not-found-boundary').bailOnNotFound =
-              require('../../client/components/dev-root-not-found-boundary').bailOnNotFound
-            bailOnNotFound()
+          if (process.env.NODE_ENV === 'development') {
+            const bailOnUIError: typeof import('../../client/components/dev-root-ui-error-boundary').bailOnUIError =
+              require('../../client/components/dev-root-ui-error-boundary').bailOnUIError
+
+            if (uiErrorType) {
+              bailOnUIError(getUIErrorHelperName(uiErrorType))
+            }
           }
           throw finalErr
         }
@@ -1480,6 +1491,7 @@ async function renderToHTMLOrFlightImpl(
   })
 
   let formState: null | any = null
+  // TODO(@panteliselef): Do we need to handle forbidden the same way as not-found in this case ?
   if (actionRequestResult) {
     if (actionRequestResult.type === 'not-found') {
       const notFoundLoaderTree = createNotFoundLoaderTree(loaderTree)

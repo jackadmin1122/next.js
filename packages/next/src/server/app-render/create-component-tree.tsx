@@ -87,7 +87,7 @@ async function createComponentTreeInternal({
     renderOpts: { nextConfigOutput, experimental },
     staticGenerationStore,
     componentMod: {
-      NotFoundBoundary,
+      UIErrorsBoundary,
       LayoutRouter,
       RenderFromTemplateContext,
       ClientPageRoot,
@@ -105,7 +105,14 @@ async function createComponentTreeInternal({
   const { page, layoutOrPagePath, segment, components, parallelRoutes } =
     parseLoaderTree(tree)
 
-  const { layout, template, error, loading, 'not-found': notFound } = components
+  const {
+    layout,
+    template,
+    error,
+    loading,
+    'not-found': notFound,
+    forbidden,
+  } = components
 
   const injectedCSSWithCurrentLayout = new Set(injectedCSS)
   const injectedJSWithCurrentLayout = new Set(injectedJS)
@@ -181,6 +188,16 @@ async function createComponentTreeInternal({
         ctx,
         filePath: notFound[1],
         getComponent: notFound[0],
+        injectedCSS: injectedCSSWithCurrentLayout,
+        injectedJS: injectedJSWithCurrentLayout,
+      })
+    : []
+
+  const [Forbidden, forbiddenStyles] = forbidden
+    ? await createComponentStylesAndScripts({
+        ctx,
+        filePath: forbidden[1],
+        getComponent: forbidden[0],
         injectedCSS: injectedCSSWithCurrentLayout,
         injectedJS: injectedJSWithCurrentLayout,
       })
@@ -278,18 +295,19 @@ async function createComponentTreeInternal({
   const parallelKeys = Object.keys(parallelRoutes)
   const hasSlotKey = parallelKeys.length > 1
 
-  // TODO-APP: This is a hack to support unmatched parallel routes, which will throw `notFound()`.
-  // This ensures that a `NotFoundBoundary` is available for when that happens,
-  // but it's not ideal, as it needlessly invokes the `NotFound` component and renders the `RootLayout` twice.
+  // TODO-APP: This is a hack to support unmatched parallel routes, which will throw `notFound()` or `forbidden()`.
+  // This ensures that a `UIErrorsBoundary` is available for when that happens,
+  // but it's not ideal, as it needlessly invokes the appropriate UIError component and renders the `RootLayout` twice.
   // We should instead look into handling the fallback behavior differently in development mode so that it doesn't
-  // rely on the `NotFound` behavior.
+  // rely on the `UIErrorsBoundary` behavior.
   if (hasSlotKey && rootLayoutAtThisLevel && LayoutOrPage) {
     Component = (componentProps: { params: Params }) => {
       const NotFoundComponent = NotFound
+      const ForbiddenComponent = Forbidden
       const RootLayoutComponent = LayoutOrPage
       return (
-        <NotFoundBoundary
-          notFound={
+        <UIErrorsBoundary
+          not-found={
             NotFoundComponent ? (
               <>
                 {layerAssets}
@@ -304,9 +322,24 @@ async function createComponentTreeInternal({
               </>
             ) : undefined
           }
+          forbidden={
+            ForbiddenComponent ? (
+              <>
+                {layerAssets}
+                {/*
+                 * We are intentionally only forwarding params to the root layout, as passing any of the parallel route props
+                 * might trigger `forbidden()`, which is not currently supported in the root layout.
+                 */}
+                <RootLayoutComponent params={componentProps.params}>
+                  {forbiddenStyles}
+                  <ForbiddenComponent />
+                </RootLayoutComponent>
+              </>
+            ) : undefined
+          }
         >
           <RootLayoutComponent {...componentProps} />
-        </NotFoundBoundary>
+        </UIErrorsBoundary>
       )
     }
   }
@@ -333,6 +366,12 @@ async function createComponentTreeInternal({
 
     if (typeof NotFound !== 'undefined' && !isValidElementType(NotFound)) {
       errorMissingDefaultExport(pagePath, 'not-found')
+    }
+
+    if (typeof Forbidden !== 'undefined' && !isValidElementType(Forbidden)) {
+      throw new Error(
+        `The default export of forbidden is not a React Component in ${segment}`
+      )
     }
   }
 
@@ -370,6 +409,9 @@ async function createComponentTreeInternal({
 
         const notFoundComponent =
           NotFound && isChildrenRouteKey ? <NotFound /> : undefined
+
+        const forbiddenComponent =
+          Forbidden && isChildrenRouteKey ? <Forbidden /> : undefined
 
         // if we're prefetching and that there's a Loading component, we bail out
         // otherwise we keep rendering for the prefetch.
@@ -468,6 +510,8 @@ async function createComponentTreeInternal({
             templateScripts={templateScripts}
             notFound={notFoundComponent}
             notFoundStyles={notFoundStyles}
+            forbidden={forbiddenComponent}
+            forbiddenStyles={forbiddenStyles}
           />,
           childCacheNodeSeedData,
         ]

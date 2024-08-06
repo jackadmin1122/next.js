@@ -51,6 +51,7 @@ enum ComponentType {
     Loading,
     Template,
     NotFound,
+    Forbidden,
 }
 
 impl ComponentType {
@@ -63,6 +64,7 @@ impl ComponentType {
             ComponentType::Loading => "loading",
             ComponentType::Template => "template",
             ComponentType::NotFound => "not-found",
+            ComponentType::Forbidden => "forbidden",
         }
     }
 }
@@ -381,6 +383,7 @@ impl LoaderTreeBuilder {
             loading,
             template,
             not_found,
+            forbidden,
             metadata,
             route: _,
         } = &*components.await?;
@@ -394,6 +397,8 @@ impl LoaderTreeBuilder {
         self.write_component(ComponentType::Template, *template)
             .await?;
         self.write_component(ComponentType::NotFound, *not_found)
+            .await?;
+        self.write_component(ComponentType::Forbidden, *forbidden)
             .await?;
         let components_code = replace(&mut self.loader_tree_code, temp_loader_tree_code);
 
