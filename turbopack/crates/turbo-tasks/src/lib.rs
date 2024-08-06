@@ -49,6 +49,7 @@ mod id;
 mod id_factory;
 mod invalidation;
 mod join_iter_ext;
+mod key_value_pair;
 #[doc(hidden)]
 pub mod macro_helpers;
 mod magic_any;
@@ -86,6 +87,7 @@ pub use invalidation::{
     DynamicEqHash, InvalidationReason, InvalidationReasonKind, InvalidationReasonSet,
 };
 pub use join_iter_ext::{JoinIterExt, TryFlatJoinIterExt, TryJoinIterExt};
+pub use key_value_pair::KeyValuePair;
 pub use magic_any::MagicAny;
 pub use manager::{
     dynamic_call, dynamic_this_call, emit, get_invalidator, mark_finished, mark_stateful,
@@ -101,7 +103,7 @@ use rustc_hash::FxHasher;
 pub use state::State;
 pub use task::{task_input::TaskInput, SharedReference};
 pub use trait_ref::{IntoTraitRef, TraitRef};
-pub use turbo_tasks_macros::{function, value, value_impl, value_trait, TaskInput};
+pub use turbo_tasks_macros::{function, value, value_impl, value_trait, KeyValuePair, TaskInput};
 pub use value::{TransientInstance, TransientValue, Value};
 pub use value_type::{TraitMethod, TraitType, ValueType};
 pub use vc::{

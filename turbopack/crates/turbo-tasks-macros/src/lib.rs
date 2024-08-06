@@ -47,6 +47,11 @@ pub fn derive_task_input(input: TokenStream) -> TokenStream {
     derive::derive_task_input(input)
 }
 
+#[proc_macro_derive(KeyValuePair)]
+pub fn derive_key_value_pair(input: TokenStream) -> TokenStream {
+    derive::derive_key_value_pair(input)
+}
+
 /// Creates a Vc<Value> struct for a `struct` or `enum` that represent
 /// that type placed into a cell in a Task.
 ///
