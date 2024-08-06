@@ -75,8 +75,6 @@ export class NextInstance {
     this.env = {}
     Object.assign(this, opts)
 
-    require('console').log('packageJson??', this.packageJson)
-
     if (!isNextDeploy) {
       this.env = {
         ...this.env,
