@@ -24,7 +24,7 @@ use turbopack_core::{
 use super::util::{request_to_string, throw_module_not_found_expr};
 use crate::{references::util::throw_module_not_found_error_expr, utils::module_id_to_lit};
 
-#[derive(PartialEq, Eq, ValueDebugFormat, TraceRawVcs, Serialize, Deserialize)]
+#[derive(PartialEq, Eq, ValueDebugFormat, TraceRawVcs, Serialize, Deserialize, Debug)]
 pub(crate) enum SinglePatternMapping {
     /// Invalid request.
     Invalid,
@@ -415,6 +415,7 @@ impl PatternMapping {
                     .await?
                     .into_iter()
                     .collect();
+                println!("{:?}", map);
                 Ok(PatternMapping::Map(map).cell())
             }
         }

@@ -7,10 +7,11 @@ use serde::{Deserialize, Serialize};
 use tracing::Instrument;
 use turbo_tasks::{trace::TraceRawVcs, RcStr, Value, ValueToString, Vc};
 use turbo_tasks_fs::{
-    DirectoryContent, DirectoryEntry, FileSystemEntryType, FileSystemPath, LinkContent, LinkType,
+    util::normalize_path, DirectoryContent, DirectoryEntry, FileSystemEntryType, FileSystemPath,
+    LinkContent, LinkType,
 };
 
-#[turbo_tasks::value(serialization = "auto_for_input")]
+#[turbo_tasks::value(shared, serialization = "auto_for_input")]
 #[derive(Hash, Clone, Debug, Default)]
 pub enum Pattern {
     Constant(RcStr),
@@ -57,6 +58,45 @@ fn concatenation_extend_or_merge_items(
     }
 }
 
+fn longest_common_prefix<'a>(strings: &[&'a str]) -> &'a str {
+    if strings.is_empty() {
+        return "";
+    }
+    let first = strings[0];
+    let mut len = first.len();
+    for str in &strings[1..] {
+        len = std::cmp::min(
+            len,
+            // TODO these are Unicode Scalar Values, not graphemes
+            str.chars()
+                .zip(first.chars())
+                .take_while(|&(a, b)| a == b)
+                .count(),
+        );
+    }
+    &first[..len]
+}
+
+fn longest_common_suffix<'a>(strings: &[&'a str]) -> &'a str {
+    if strings.is_empty() {
+        return "";
+    }
+    let first = strings[0];
+    let mut len = first.len();
+    for str in &strings[1..] {
+        len = std::cmp::min(
+            len,
+            // TODO these are Unicode Scalar Values, not graphemes
+            str.chars()
+                .rev()
+                .zip(first.chars().rev())
+                .take_while(|&(a, b)| a == b)
+                .count(),
+        );
+    }
+    &first[(first.len() - len)..]
+}
+
 impl Pattern {
     // TODO this should be removed in favor of pattern resolving
     pub fn into_string(self) -> Option<RcStr> {
@@ -83,6 +123,213 @@ impl Pattern {
         }
     }
 
+    pub fn constant_prefix(&self) -> &str {
+        // The normalized pattern is a Alternative of maximally merged
+        // Concatenations, so extracting the first/only Concatenation child
+        // elements is enough.
+
+        fn collect_constant_prefix<'a: 'b, 'b>(pattern: &'a Pattern, result: &mut Vec<&'b str>) {
+            match pattern {
+                Pattern::Constant(c) => {
+                    result.push(c.as_str());
+                }
+                Pattern::Concatenation(list) => {
+                    if let Some(Pattern::Constant(first)) = list.first() {
+                        result.push(first.as_str());
+                    }
+                }
+                Pattern::Alternatives(_) => {
+                    panic!("for constant_prefix a Pattern must be normalized");
+                }
+                Pattern::Dynamic => {}
+            }
+        }
+
+        let mut strings: Vec<&str> = vec![];
+        match self {
+            c @ Pattern::Constant(_) | c @ Pattern::Concatenation(_) => {
+                collect_constant_prefix(c, &mut strings);
+            }
+            Pattern::Alternatives(list) => {
+                for c in list {
+                    collect_constant_prefix(c, &mut strings);
+                }
+            }
+            Pattern::Dynamic => {}
+        }
+        longest_common_prefix(&strings)
+    }
+
+    pub fn constant_suffix(&self) -> &str {
+        // The normalized pattern is a Alternative of maximally merged
+        // Concatenations, so extracting the first/only Concatenation child
+        // elements is enough.
+
+        fn collect_constant_suffix<'a: 'b, 'b>(pattern: &'a Pattern, result: &mut Vec<&'b str>) {
+            match pattern {
+                Pattern::Constant(c) => {
+                    result.push(c.as_str());
+                }
+                Pattern::Concatenation(list) => {
+                    if let Some(Pattern::Constant(first)) = list.last() {
+                        result.push(first.as_str());
+                    }
+                }
+                Pattern::Alternatives(_) => {
+                    panic!("for constant_suffix a Pattern must be normalized");
+                }
+                Pattern::Dynamic => {}
+            }
+        }
+
+        let mut strings: Vec<&str> = vec![];
+        match self {
+            c @ Pattern::Constant(_) | c @ Pattern::Concatenation(_) => {
+                collect_constant_suffix(c, &mut strings);
+            }
+            Pattern::Alternatives(list) => {
+                for c in list {
+                    collect_constant_suffix(c, &mut strings);
+                }
+            }
+            Pattern::Dynamic => {}
+        }
+        longest_common_suffix(&strings)
+    }
+
+    pub fn strip_prefix(&mut self, len: usize) {
+        fn strip_prefix_internal(pattern: &mut Pattern, chars_to_strip: &mut usize) {
+            match pattern {
+                Pattern::Constant(c) => {
+                    let c_len = c.len();
+                    if *chars_to_strip >= c_len {
+                        *c = "".into();
+                    } else {
+                        *c = (&c[*chars_to_strip..]).into();
+                    }
+                    *chars_to_strip = (*chars_to_strip).saturating_sub(c_len);
+                }
+                Pattern::Concatenation(list) => {
+                    for c in list {
+                        if *chars_to_strip > 0 {
+                            strip_prefix_internal(c, chars_to_strip);
+                        }
+                    }
+                }
+                Pattern::Alternatives(_) => {
+                    panic!("for strip_prefix a Pattern must be normalized");
+                }
+                Pattern::Dynamic => {
+                    panic!("strip_prefix prefix is too long");
+                }
+            }
+        }
+
+        match &mut *self {
+            c @ Pattern::Constant(_) | c @ Pattern::Concatenation(_) => {
+                let mut len_local = len;
+                strip_prefix_internal(c, &mut len_local);
+            }
+            Pattern::Alternatives(list) => {
+                for c in list {
+                    let mut len_local = len;
+                    strip_prefix_internal(c, &mut len_local);
+                }
+            }
+            Pattern::Dynamic => {
+                if len > 0 {
+                    panic!("strip_prefix prefix is too long");
+                }
+            }
+        };
+
+        self.normalize()
+    }
+
+    pub fn strip_suffix(&mut self, len: usize) {
+        fn strip_suffix_internal(pattern: &mut Pattern, chars_to_strip: &mut usize) {
+            match pattern {
+                Pattern::Constant(c) => {
+                    let c_len = c.len();
+                    if *chars_to_strip >= c_len {
+                        *c = "".into();
+                    } else {
+                        *c = (&c[..(c_len - *chars_to_strip)]).into();
+                    }
+                    *chars_to_strip = (*chars_to_strip).saturating_sub(c_len);
+                }
+                Pattern::Concatenation(list) => {
+                    for c in list.iter_mut().rev() {
+                        if *chars_to_strip > 0 {
+                            strip_suffix_internal(c, chars_to_strip);
+                        }
+                    }
+                }
+                Pattern::Alternatives(_) => {
+                    panic!("for strip_suffix a Pattern must be normalized");
+                }
+                Pattern::Dynamic => {
+                    panic!("strip_suffix suffix is too long");
+                }
+            }
+        }
+
+        match &mut *self {
+            c @ Pattern::Constant(_) | c @ Pattern::Concatenation(_) => {
+                let mut len_local = len;
+                strip_suffix_internal(c, &mut len_local);
+            }
+            Pattern::Alternatives(list) => {
+                for c in list {
+                    let mut len_local = len;
+                    strip_suffix_internal(c, &mut len_local);
+                }
+            }
+            Pattern::Dynamic => {
+                if len > 0 {
+                    panic!("strip_suffix suffix is too long");
+                }
+            }
+        };
+
+        self.normalize()
+    }
+
+    //// Replace all `*`s in `template` with self.
+    ////
+    //// Handle top-level alternatives seperately so that multiple star placeholders
+    //// match the same pattern instead of the whole alternative.
+    pub fn spread_into_star(&self, template: &str) -> Pattern {
+        if template.contains("*") {
+            let alternatives: Box<dyn Iterator<Item = &Pattern>> = match self {
+                Pattern::Alternatives(list) => Box::new(list.iter()),
+                c => Box::new(std::iter::once(c)),
+            };
+
+            let mut result = Pattern::alternatives(alternatives.map(|pat| {
+                let mut split = template.split("*");
+                let mut concatenation: Vec<Pattern> = Vec::with_capacity(3);
+
+                // There are at least two elements in the iterator
+                concatenation.push(Pattern::Constant(split.next().unwrap().into()));
+
+                for part in split {
+                    concatenation.push(pat.clone());
+                    if !part.is_empty() {
+                        concatenation.push(Pattern::Constant(part.into()));
+                    }
+                }
+                Pattern::Concatenation(concatenation)
+            }));
+
+            result.normalize();
+            result
+        } else {
+            Pattern::Constant(template.into())
+        }
+    }
+
+    /// Appends something to end the pattern.
     pub fn extend(&mut self, concatenated: impl Iterator<Item = Self>) {
         if let Pattern::Concatenation(list) = self {
             concatenation_extend_or_merge_items(list, concatenated);
@@ -99,6 +346,7 @@ impl Pattern {
         }
     }
 
+    /// Appends something to end the pattern.
     pub fn push(&mut self, pat: Pattern) {
         match (self, pat) {
             (Pattern::Concatenation(list), Pattern::Concatenation(more)) => {
@@ -122,6 +370,7 @@ impl Pattern {
         }
     }
 
+    /// Prepends something to front of the pattern.
     pub fn push_front(&mut self, pat: Pattern) {
         match (self, pat) {
             (Pattern::Concatenation(list), Pattern::Concatenation(mut more)) => {
@@ -168,6 +417,80 @@ impl Pattern {
         current
     }
 
+    pub fn with_normalized_path(&self) -> Option<Pattern> {
+        let mut new = self.clone();
+
+        fn normalize_path_internal(pattern: &mut Pattern) -> Option<()> {
+            match pattern {
+                Pattern::Constant(c) => {
+                    *c = (*(normalize_path(c)?)).into();
+                    Some(())
+                }
+                Pattern::Dynamic => Some(()),
+                Pattern::Concatenation(list) => {
+                    let mut segments = Vec::new();
+                    for seqment in list.iter() {
+                        match seqment {
+                            Pattern::Constant(str) => {
+                                for seqment in str.split('/') {
+                                    match seqment {
+                                        "." | "" => {}
+                                        ".." => {
+                                            segments.pop()?;
+                                        }
+                                        seqment => {
+                                            segments.push(vec![Pattern::Constant(seqment.into())]);
+                                        }
+                                    }
+                                }
+                                if str.ends_with("/") {
+                                    segments.push(vec![]);
+                                }
+                            }
+                            Pattern::Dynamic => {
+                                if segments.is_empty() {
+                                    segments.push(vec![]);
+                                }
+                                let last = segments.last_mut().unwrap();
+                                last.push(Pattern::Dynamic);
+                            }
+                            Pattern::Alternatives(_) | Pattern::Concatenation(_) => {
+                                panic!("for with_normalized_path the Pattern must be normalized");
+                            }
+                        }
+                    }
+                    let separator: RcStr = "/".into();
+                    *list = segments
+                        .into_iter()
+                        .flat_map(|c| {
+                            std::iter::once(Pattern::Constant(separator.clone())).chain(c)
+                        })
+                        .skip(1)
+                        .collect();
+                    Some(())
+                }
+                Pattern::Alternatives(_) => {
+                    panic!("for with_normalized_path the Pattern must be normalized");
+                }
+            }
+        }
+
+        match &mut new {
+            c @ Pattern::Constant(_) | c @ Pattern::Concatenation(_) => {
+                normalize_path_internal(c)?;
+            }
+            Pattern::Alternatives(list) => {
+                for c in list {
+                    normalize_path_internal(c)?;
+                }
+            }
+            Pattern::Dynamic => {}
+        }
+
+        new.normalize();
+        Some(new)
+    }
+
     /// Order into Alternatives -> Concatenation -> Constant/Dynamic
     /// Merge when possible
     pub fn normalize(&mut self) {
@@ -197,7 +520,11 @@ impl Pattern {
                         new_alternatives.push(alt);
                     }
                 }
-                *list = new_alternatives;
+                if new_alternatives.len() == 1 {
+                    *self = new_alternatives.into_iter().next().unwrap();
+                } else {
+                    *list = new_alternatives;
+                }
             }
             Pattern::Concatenation(list) => {
                 let mut has_alternatives = false;
@@ -407,6 +734,16 @@ impl Pattern {
                 .any(|alt| alt.match_internal(value, None, false).could_match_others())
         } else {
             self.match_internal(value, None, false).could_match_others()
+        }
+    }
+
+    /// Returns true if all matches of the the pattern start with `value`.
+    pub fn must_match(&self, value: &str) -> bool {
+        if let Pattern::Alternatives(list) = self {
+            list.iter()
+                .all(|alt| alt.match_internal(value, None, false).could_match())
+        } else {
+            self.match_internal(value, None, false).could_match()
         }
     }
 
@@ -1140,7 +1477,25 @@ mod tests {
     use rstest::*;
     use turbo_tasks::RcStr;
 
-    use super::Pattern;
+    use super::{longest_common_prefix, longest_common_suffix, Pattern};
+
+    #[test]
+    fn longest_common_prefix_test() {
+        assert_eq!(longest_common_prefix(&["ab"]), "ab");
+        assert_eq!(longest_common_prefix(&["ab", "cd", "ef"]), "");
+        assert_eq!(longest_common_prefix(&["ab1", "ab23", "ab456"]), "ab");
+        assert_eq!(longest_common_prefix(&["abc", "abc", "abc"]), "abc");
+        assert_eq!(longest_common_prefix(&["abc", "a", "abc"]), "a");
+    }
+
+    #[test]
+    fn longest_common_suffix_test() {
+        assert_eq!(longest_common_suffix(&["ab"]), "ab");
+        assert_eq!(longest_common_suffix(&["ab", "cd", "ef"]), "");
+        assert_eq!(longest_common_suffix(&["1ab", "23ab", "456ab"]), "ab");
+        assert_eq!(longest_common_suffix(&["abc", "abc", "abc"]), "abc");
+        assert_eq!(longest_common_suffix(&["abc", "c", "abc"]), "c");
+    }
 
     #[test]
     fn normalize() {
@@ -1193,6 +1548,63 @@ mod tests {
                 ])
             );
         }
+
+        #[allow(clippy::redundant_clone)] // alignment
+        {
+            let mut p = Pattern::Alternatives(vec![a.clone()]);
+            p.normalize();
+
+            assert_eq!(p, a);
+        }
+    }
+
+    #[test]
+    fn with_normalized_path() {
+        assert!(Pattern::Constant("a/../..".into())
+            .with_normalized_path()
+            .is_none());
+        assert_eq!(
+            Pattern::Constant("a/b/../c".into())
+                .with_normalized_path()
+                .unwrap(),
+            Pattern::Constant("a/c".into())
+        );
+        assert_eq!(
+            Pattern::Alternatives(vec![
+                Pattern::Constant("a/b/../c".into()),
+                Pattern::Constant("a/b/../c/d".into())
+            ])
+            .with_normalized_path()
+            .unwrap(),
+            Pattern::Alternatives(vec![
+                Pattern::Constant("a/c".into()),
+                Pattern::Constant("a/c/d".into())
+            ])
+        );
+
+        // Dynamic is a segment itself
+        assert_eq!(
+            Pattern::Concatenation(vec![
+                Pattern::Constant("a/b/".into()),
+                Pattern::Dynamic,
+                Pattern::Constant("../c".into())
+            ])
+            .with_normalized_path()
+            .unwrap(),
+            Pattern::Constant("a/b/c".into())
+        );
+
+        // Dynamic is only part of the second segment
+        assert_eq!(
+            Pattern::Concatenation(vec![
+                Pattern::Constant("a/b".into()),
+                Pattern::Dynamic,
+                Pattern::Constant("../c".into())
+            ])
+            .with_normalized_path()
+            .unwrap(),
+            Pattern::Constant("a/c".into())
+        );
     }
 
     #[test]
@@ -1222,6 +1634,186 @@ mod tests {
         assert!(!pat.could_match("./inner/../"));
         assert!(!pat.could_match("./inner/./"));
         assert!(!pat.could_match("./inner/.git/"));
+    }
+
+    #[test]
+    fn constant_prefix() {
+        assert_eq!(
+            Pattern::Constant("a/b/c.js".into()).constant_prefix(),
+            "a/b/c.js",
+        );
+
+        let pat = Pattern::Alternatives(vec![
+            Pattern::Constant("a/b/x".into()),
+            Pattern::Constant("a/b/y".into()),
+            Pattern::Concatenation(vec![Pattern::Constant("a/b/c/".into()), Pattern::Dynamic]),
+        ]);
+        assert_eq!(pat.constant_prefix(), "a/b/");
+    }
+
+    #[test]
+    fn constant_suffix() {
+        assert_eq!(
+            Pattern::Constant("a/b/c.js".into()).constant_suffix(),
+            "a/b/c.js",
+        );
+
+        let pat = Pattern::Alternatives(vec![
+            Pattern::Constant("a/b/x.js".into()),
+            Pattern::Constant("a/b/y.js".into()),
+            Pattern::Concatenation(vec![
+                Pattern::Constant("a/b/c/".into()),
+                Pattern::Dynamic,
+                Pattern::Constant(".js".into()),
+            ]),
+        ]);
+        assert_eq!(pat.constant_suffix(), ".js");
+    }
+
+    #[test]
+    fn strip_prefix() {
+        fn strip(mut pat: Pattern, n: usize) -> Pattern {
+            pat.strip_prefix(n);
+            pat
+        }
+
+        assert_eq!(
+            strip(Pattern::Constant("a/b".into()), 0),
+            Pattern::Constant("a/b".into())
+        );
+
+        assert_eq!(
+            strip(
+                Pattern::Alternatives(vec![
+                    Pattern::Constant("a/b/x".into()),
+                    Pattern::Constant("a/b/y".into()),
+                ]),
+                2
+            ),
+            Pattern::Alternatives(vec![
+                Pattern::Constant("b/x".into()),
+                Pattern::Constant("b/y".into()),
+            ])
+        );
+
+        assert_eq!(
+            strip(
+                Pattern::Concatenation(vec![
+                    Pattern::Constant("a/".into()),
+                    Pattern::Constant("b".into()),
+                    Pattern::Constant("/".into()),
+                    Pattern::Constant("y/".into()),
+                    Pattern::Dynamic
+                ]),
+                4
+            ),
+            Pattern::Concatenation(vec![Pattern::Constant("y/".into()), Pattern::Dynamic]),
+        );
+    }
+
+    #[test]
+    fn strip_suffix() {
+        fn strip(mut pat: Pattern, n: usize) -> Pattern {
+            pat.strip_suffix(n);
+            pat
+        }
+
+        assert_eq!(
+            strip(Pattern::Constant("a/b".into()), 0),
+            Pattern::Constant("a/b".into())
+        );
+
+        assert_eq!(
+            strip(
+                Pattern::Alternatives(vec![
+                    Pattern::Constant("x/b/a".into()),
+                    Pattern::Constant("y/b/a".into()),
+                ]),
+                2
+            ),
+            Pattern::Alternatives(vec![
+                Pattern::Constant("x/b".into()),
+                Pattern::Constant("y/b".into()),
+            ])
+        );
+
+        assert_eq!(
+            strip(
+                Pattern::Concatenation(vec![
+                    Pattern::Dynamic,
+                    Pattern::Constant("/a/".into()),
+                    Pattern::Constant("b".into()),
+                    Pattern::Constant("/".into()),
+                    Pattern::Constant("y/".into()),
+                ]),
+                4
+            ),
+            Pattern::Concatenation(vec![Pattern::Dynamic, Pattern::Constant("/a/".into()),]),
+        );
+    }
+
+    #[test]
+    fn spread_into_star() {
+        let pat = Pattern::Constant("xyz".into());
+        assert_eq!(
+            pat.spread_into_star("before/after"),
+            Pattern::Constant("before/after".into()),
+        );
+
+        let pat =
+            Pattern::Concatenation(vec![Pattern::Constant("a/b/c/".into()), Pattern::Dynamic]);
+        assert_eq!(
+            pat.spread_into_star("before/*/after"),
+            Pattern::Concatenation(vec![
+                Pattern::Constant("before/a/b/c/".into()),
+                Pattern::Dynamic,
+                Pattern::Constant("/after".into())
+            ])
+        );
+
+        let pat = Pattern::Alternatives(vec![
+            Pattern::Concatenation(vec![Pattern::Constant("a/".into()), Pattern::Dynamic]),
+            Pattern::Concatenation(vec![Pattern::Constant("b/".into()), Pattern::Dynamic]),
+        ]);
+        assert_eq!(
+            pat.spread_into_star("before/*/after"),
+            Pattern::Alternatives(vec![
+                Pattern::Concatenation(vec![
+                    Pattern::Constant("before/a/".into()),
+                    Pattern::Dynamic,
+                    Pattern::Constant("/after".into())
+                ]),
+                Pattern::Concatenation(vec![
+                    Pattern::Constant("before/b/".into()),
+                    Pattern::Dynamic,
+                    Pattern::Constant("/after".into())
+                ]),
+            ])
+        );
+
+        let pat = Pattern::Alternatives(vec![
+            Pattern::Constant("a".into()),
+            Pattern::Constant("b".into()),
+        ]);
+        assert_eq!(
+            pat.spread_into_star("before/*/*"),
+            Pattern::Alternatives(vec![
+                Pattern::Constant("before/a/a".into()),
+                Pattern::Constant("before/b/b".into()),
+            ])
+        );
+
+        let pat = Pattern::Dynamic;
+        assert_eq!(
+            pat.spread_into_star("before/*/*"),
+            Pattern::Concatenation(vec![
+                // TODO currently nothing ensures that both Dynamic parts are equal
+                Pattern::Constant("before/".into()),
+                Pattern::Dynamic,
+                Pattern::Constant("/".into()),
+                Pattern::Dynamic
+            ])
+        );
     }
 
     #[rstest]

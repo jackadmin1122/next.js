@@ -13,8 +13,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{Instrument, Level};
 use turbo_tasks::{trace::TraceRawVcs, RcStr, TaskInput, TryJoinIterExt, Value, ValueToString, Vc};
 use turbo_tasks_fs::{
-    util::{normalize_path, normalize_request},
-    FileSystemEntryType, FileSystemPath, RealPathResult,
+    util::normalize_request, FileSystemEntryType, FileSystemPath, RealPathResult,
 };
 
 use self::{
@@ -1505,13 +1504,26 @@ async fn handle_after_resolve_plugins(
     .cell())
 }
 
+use turbo_tasks::debug::ValueDebug;
 #[turbo_tasks::function]
 async fn resolve_internal(
     lookup_path: Vc<FileSystemPath>,
     request: Vc<Request>,
     options: Vc<ResolveOptions>,
 ) -> Result<Vc<ResolveResult>> {
-    resolve_internal_inline(lookup_path, request, options).await
+    let x = resolve_internal_inline(lookup_path, request, options).await?;
+    match &*request.await? {
+        Request::Module { module, .. } if module == "@" => {
+            println!(
+                "resolve_internal {:?} {:?} {:?}",
+                lookup_path.await?.path,
+                request.dbg().await?,
+                x.dbg().await?
+            );
+        }
+        _ => {}
+    }
+    Ok(x)
 }
 
 fn resolve_internal_boxed(
@@ -2444,6 +2456,19 @@ async fn resolve_import_map_result(
         ImportMapResult::Alias(request, alias_lookup_path) => {
             let request = *request;
             let lookup_path = alias_lookup_path.unwrap_or(lookup_path);
+            match &*original_request.await? {
+                Request::Module { module, .. } if module == "@" => {
+                    println!(
+                        "resolve_import_map_result {:?} - {:?} {:?} - {:?} {:?}",
+                        result.clone().cell().dbg().await?,
+                        lookup_path.await?.path,
+                        request.dbg().await?,
+                        original_lookup_path.await?.path,
+                        original_request.dbg().await?,
+                    );
+                }
+                _ => {}
+            }
             // We must avoid cycles during resolving
             if request.resolve().await? == original_request
                 && lookup_path.resolve().await? == original_lookup_path
@@ -2572,8 +2597,8 @@ async fn handle_exports_imports_field(
     let mut conditions_state = HashMap::new();
 
     let query_str = query.await?;
+    let req = Pattern::Constant(format!("{}{}", path, query_str).into());
 
-    let req = format!("{}{}", path, query_str);
     let values = exports_imports_field
         .lookup(&req)
         .map(AliasMatch::try_into_self)
@@ -2592,9 +2617,12 @@ async fn handle_exports_imports_field(
 
     let mut resolved_results = Vec::new();
     for (result_path, conditions) in results {
-        if let Some(result_path) = normalize_path(result_path) {
-            let request =
-                Request::parse(Value::new(RcStr::from(format!("./{}", result_path)).into()));
+        if let Some(result_path) = result_path.with_normalized_path() {
+            let request = Request::parse(Value::new(Pattern::Concatenation(vec![
+                Pattern::Constant("./".into()),
+                result_path,
+            ])));
+
             let resolve_result = resolve_internal_boxed(package_path, request, options).await?;
             if conditions.is_empty() {
                 resolved_results.push(resolve_result.with_request(path.into()));
