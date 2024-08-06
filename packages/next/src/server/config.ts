@@ -1183,6 +1183,10 @@ export function getEnabledExperimentalFeatures(
         userNextConfigExperimental[featureName] !==
           defaultConfig.experimental[featureName]
       ) {
+        if (featureName === 'turbo' && !process.env.TURBOPACK) {
+          continue
+        }
+
         enabledExperiments.push(featureName)
       }
     }
