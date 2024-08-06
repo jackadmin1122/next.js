@@ -622,6 +622,7 @@ function doRender(input: RenderRouteInfo): Promise<any> {
   let { App, Component, props, err }: RenderRouteInfo = input
   let styleSheets: StyleSheetTuple[] | undefined =
     'initial' in input ? undefined : input.styleSheets
+
   Component = Component || lastAppProps.Component
   props = props || lastAppProps.props
 
@@ -716,6 +717,9 @@ function doRender(input: RenderRouteInfo): Promise<any> {
         (tag) => tag.getAttribute('data-n-href')!
       )
 
+      console.log('currentHrefs', { currentHrefs })
+      console.log('desiredHrefs', { desiredHrefs })
+
       // Toggle `<style>` tags on or off depending on if they're needed:
       for (let idx = 0; idx < currentHrefs.length; ++idx) {
         if (desiredHrefs.has(currentHrefs[idx])) {
@@ -754,6 +758,20 @@ function doRender(input: RenderRouteInfo): Promise<any> {
       looseToArray<HTMLLinkElement>(
         document.querySelectorAll('link[data-n-p]')
       ).forEach((el) => {
+        // rel="preload", href=el.href, as=style
+        const elHref = el.getAttribute('href')
+        const preload = document.querySelector(
+          `link[rel=preload][as=style][href="${elHref}"]`
+        )
+
+        console.log('preload', { preload, href: elHref })
+
+        if (preload) {
+          // remove el's classname data-n-p
+          el.removeAttribute('data-n-p')
+          return
+        }
+
         el.parentNode!.removeChild(el)
       })
     }
