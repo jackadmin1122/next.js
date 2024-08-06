@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 
 use anyhow::{bail, Context, Result};
-use async_recursion::async_recursion;
 use indexmap::{
     indexmap,
     map::{Entry, OccupiedEntry},
@@ -71,17 +70,6 @@ impl Components {
             route: None,
             metadata: self.metadata.clone(),
         }
-    }
-}
-
-#[turbo_tasks::value_impl]
-impl Components {
-    /// Returns a completion that changes when any route in the components
-    /// changes.
-    #[turbo_tasks::function]
-    pub async fn routes_changed(self: Vc<Self>) -> Result<Vc<Completion>> {
-        self.await?;
-        Ok(Completion::new())
     }
 }
 
@@ -217,7 +205,15 @@ impl GlobalMetadata {
 pub struct DirectoryTree {
     /// key is e.g. "dashboard", "(dashboard)", "@slot"
     pub subdirectories: BTreeMap<RcStr, Vc<DirectoryTree>>,
-    pub components: Vc<Components>,
+    pub components: Components,
+}
+
+#[turbo_tasks::value]
+#[derive(Clone, Debug)]
+struct PlainDirectoryTree {
+    /// key is e.g. "dashboard", "(dashboard)", "@slot"
+    pub subdirectories: BTreeMap<RcStr, PlainDirectoryTree>,
+    pub components: Components,
 }
 
 #[turbo_tasks::value_impl]
@@ -225,17 +221,49 @@ impl DirectoryTree {
     /// Returns a completion that changes when any route in the whole tree
     /// changes.
     #[turbo_tasks::function]
-    pub async fn routes_changed(self: Vc<Self>) -> Result<Vc<Completion>> {
-        let DirectoryTree {
-            subdirectories,
-            components,
-        } = &*self.await?;
+    pub async fn routes_changed(&self) -> Result<Vc<Completion>> {
         let mut children = Vec::new();
-        children.push(components.routes_changed());
-        for child in subdirectories.values() {
+        children.push(Completion::new());
+        for child in self.subdirectories.values() {
             children.push(child.routes_changed());
         }
         Ok(Vc::<Completions>::cell(children).completed())
+    }
+
+    #[turbo_tasks::function]
+    async fn plain_from_path(
+        &self,
+        app_page: AppPage,
+        for_app_path: AppPath,
+    ) -> Result<Vc<PlainDirectoryTree>> {
+        let mut subdirectories = BTreeMap::new();
+
+        for (name, subdirectory) in &self.subdirectories {
+            let mut child_app_page = app_page.clone();
+
+            // ignore result, gets handled in directory tree to loader tree
+            child_app_page.push_str(name).ok();
+
+            let app_path = AppPath::from(app_page.clone());
+
+            if !for_app_path.contains(&app_path) {
+                continue;
+            }
+
+            subdirectories.insert(
+                name.clone(),
+                subdirectory
+                    .plain_from_path(child_app_page, for_app_path.clone())
+                    .await?
+                    .clone_value(),
+            );
+        }
+
+        Ok(PlainDirectoryTree {
+            subdirectories,
+            components: self.components.clone(),
+        }
+        .cell())
     }
 }
 
@@ -308,7 +336,7 @@ async fn get_directory_tree_internal(
         // so we just return an empty tree here.
         return Ok(DirectoryTree {
             subdirectories: Default::default(),
-            components: Components::default().cell(),
+            components: Components::default(),
         }
         .cell());
     };
@@ -421,7 +449,7 @@ async fn get_directory_tree_internal(
 
     Ok(DirectoryTree {
         subdirectories,
-        components: components.cell(),
+        components,
     }
     .cell())
 }
@@ -431,44 +459,41 @@ async fn get_directory_tree_internal(
 pub struct LoaderTree {
     pub page: AppPage,
     pub segment: RcStr,
-    pub parallel_routes: IndexMap<RcStr, Vc<LoaderTree>>,
-    pub components: Vc<Components>,
+    pub parallel_routes: IndexMap<RcStr, LoaderTree>,
+    pub components: Components,
     pub global_metadata: Vc<GlobalMetadata>,
 }
 
-#[turbo_tasks::value_impl]
 impl LoaderTree {
     /// Returns true if there's a page match in this loader tree.
-    #[turbo_tasks::function]
-    pub async fn has_page(&self) -> Result<Vc<bool>> {
+    pub fn has_page(&self) -> bool {
         if &*self.segment == "__PAGE__" {
-            return Ok(Vc::cell(true));
+            return true;
         }
 
         for (_, tree) in &self.parallel_routes {
-            if *tree.has_page().await? {
-                return Ok(Vc::cell(true));
+            if tree.has_page() {
+                return true;
             }
         }
 
-        Ok(Vc::cell(false))
+        false
     }
 
     /// Returns whether or not the only match in this tree is for a catch-all
     /// route.
-    #[turbo_tasks::function]
-    pub async fn has_only_catchall(&self) -> Result<Vc<bool>> {
+    pub fn has_only_catchall(&self) -> bool {
         if &*self.segment == "__PAGE__" && !self.page.is_catchall() {
-            return Ok(Vc::cell(false));
+            return false;
         }
 
         for (_, tree) in &self.parallel_routes {
-            if !*tree.has_only_catchall().await? {
-                return Ok(Vc::cell(false));
+            if !tree.has_only_catchall() {
+                return false;
             }
         }
 
-        Ok(Vc::cell(true))
+        true
     }
 }
 
@@ -560,12 +585,12 @@ fn conflict_issue(
     .emit();
 }
 
-async fn add_app_page(
+fn add_app_page(
     app_dir: Vc<FileSystemPath>,
     result: &mut IndexMap<AppPath, Entrypoint>,
     page: AppPage,
     loader_tree: Vc<LoaderTree>,
-) -> Result<()> {
+) {
     let mut e = match result.entry(page.clone().into()) {
         Entry::Occupied(e) => e,
         Entry::Vacant(e) => {
@@ -573,7 +598,7 @@ async fn add_app_page(
                 pages: vec![page],
                 loader_tree,
             });
-            return Ok(());
+            return;
         }
     };
 
@@ -617,8 +642,6 @@ async fn add_app_page(
             conflict("metadata", existing_page);
         }
     }
-
-    Ok(())
 }
 
 fn add_app_route(
@@ -760,10 +783,7 @@ impl Issue for DuplicateParallelRouteIssue {
     }
 }
 
-#[async_recursion]
-async fn page_path_except_parallel(loader_tree: Vc<LoaderTree>) -> Result<Option<AppPage>> {
-    let loader_tree = loader_tree.await?;
-
+fn page_path_except_parallel(loader_tree: &LoaderTree) -> Option<AppPage> {
     if loader_tree.page.iter().any(|v| {
         matches!(
             v,
@@ -772,28 +792,26 @@ async fn page_path_except_parallel(loader_tree: Vc<LoaderTree>) -> Result<Option
                 | PageSegment::Parallel(..)
         )
     }) {
-        return Ok(None);
+        return None;
     }
 
-    if loader_tree.components.await?.page.is_some() {
-        return Ok(Some(loader_tree.page.clone()));
+    if loader_tree.components.page.is_some() {
+        return Some(loader_tree.page.clone());
     }
 
     if let Some(children) = loader_tree.parallel_routes.get("children") {
-        return page_path_except_parallel(*children).await;
+        return page_path_except_parallel(children);
     }
 
-    Ok(None)
+    None
 }
 
-async fn check_duplicate(
+fn check_duplicate(
     duplicate: &mut FxHashMap<AppPath, AppPage>,
-    loader_tree_vc: Vc<LoaderTree>,
+    loader_tree: &LoaderTree,
     app_dir: Vc<FileSystemPath>,
-) -> Result<()> {
-    let loader_tree = loader_tree_vc.await?;
-
-    let page_path = page_path_except_parallel(loader_tree_vc).await?;
+) {
+    let page_path = page_path_except_parallel(loader_tree);
 
     if let Some(page_path) = page_path {
         if let Some(prev) = duplicate.insert(AppPath::from(page_path.clone()), page_path.clone()) {
@@ -807,8 +825,6 @@ async fn check_duplicate(
             }
         }
     }
-
-    Ok(())
 }
 
 /// creates the loader tree for a specific route (pathname / [AppPath])
@@ -822,14 +838,38 @@ async fn directory_tree_to_loader_tree(
     // the page this loader tree is constructed for
     for_app_path: AppPath,
 ) -> Result<Vc<Option<Vc<LoaderTree>>>> {
+    let plain_tree = &*directory_tree
+        .plain_from_path(app_page.clone(), for_app_path.clone())
+        .await?;
+
+    let tree = directory_tree_to_loader_tree_internal(
+        app_dir,
+        global_metadata,
+        directory_name,
+        plain_tree,
+        app_page,
+        for_app_path,
+    )?;
+
+    Ok(Vc::cell(tree.map(|tree| tree.cell())))
+}
+
+fn directory_tree_to_loader_tree_internal(
+    app_dir: Vc<FileSystemPath>,
+    global_metadata: Vc<GlobalMetadata>,
+    directory_name: RcStr,
+    directory_tree: &PlainDirectoryTree,
+    app_page: AppPage,
+    // the page this loader tree is constructed for
+    for_app_path: AppPath,
+) -> Result<Option<LoaderTree>> {
     let app_path = AppPath::from(app_page.clone());
 
     if !for_app_path.contains(&app_path) {
-        return Ok(Vc::cell(None));
+        return Ok(None);
     }
 
-    let directory_tree = &*directory_tree.await?;
-    let mut components = directory_tree.components.await?.clone_value();
+    let mut components = directory_tree.components.clone();
 
     // Capture the current page for the metadata to calculate segment relative to
     // the corresponding page for the static metadata files.
@@ -857,7 +897,7 @@ async fn directory_tree_to_loader_tree(
         page: app_page.clone(),
         segment: directory_name.clone(),
         parallel_routes: IndexMap::new(),
-        components: components.without_leafs().cell(),
+        components: components.without_leafs(),
         global_metadata,
     };
 
@@ -892,11 +932,9 @@ async fn directory_tree_to_loader_tree(
                     page: Some(page),
                     metadata,
                     ..Default::default()
-                }
-                .cell(),
+                },
                 global_metadata,
-            }
-            .cell(),
+            },
         );
 
         if current_level_is_parallel_route {
@@ -920,17 +958,16 @@ async fn directory_tree_to_loader_tree(
             illegal_path_error = Some(e);
         }
 
-        let subtree = *directory_tree_to_loader_tree(
+        let subtree = directory_tree_to_loader_tree_internal(
             app_dir,
             global_metadata,
             subdir_name.clone(),
-            *subdirectory,
+            subdirectory,
             child_app_page.clone(),
             for_app_path.clone(),
-        )
-        .await?;
+        )?;
 
-        if let Some(illegal_path) = subtree.and(illegal_path_error) {
+        if let Some(illegal_path) = subtree.as_ref().and(illegal_path_error) {
             return Err(illegal_path);
         }
 
@@ -941,19 +978,19 @@ async fn directory_tree_to_loader_tree(
             }
 
             // skip groups which don't have a page match.
-            if is_group_route(subdir_name) && !*subtree.has_page().await? {
+            if is_group_route(subdir_name) && !subtree.has_page() {
                 continue;
             }
 
-            if *subtree.has_page().await? {
-                check_duplicate(&mut duplicate, subtree, app_dir).await?;
+            if subtree.has_page() {
+                check_duplicate(&mut duplicate, &subtree, app_dir);
             }
 
             if let Some(current_tree) = tree.parallel_routes.get("children") {
-                if is_current_directory_catchall && *subtree.has_only_catchall().await? {
+                if is_current_directory_catchall && subtree.has_only_catchall() {
                     // there's probably already a more specific page in the
                     // slot.
-                } else if *current_tree.has_only_catchall().await? {
+                } else if current_tree.has_only_catchall() {
                     tree.parallel_routes.insert("children".into(), subtree);
                 } else {
                     // TODO: Investigate if this is still needed. Emitting the
@@ -993,8 +1030,7 @@ async fn directory_tree_to_loader_tree(
             tree.components = Components {
                 default: Some(default),
                 ..Default::default()
-            }
-            .cell();
+            };
         } else if current_level_is_parallel_route {
             // default fallback component
             tree.components = Components {
@@ -1003,10 +1039,9 @@ async fn directory_tree_to_loader_tree(
                         .join("dist/client/components/parallel-route-default.js".into()),
                 ),
                 ..Default::default()
-            }
-            .cell();
+            };
         } else {
-            return Ok(Vc::cell(None));
+            return Ok(None);
         }
     } else if tree.parallel_routes.get("children").is_none() {
         tree.parallel_routes.insert(
@@ -1020,7 +1055,6 @@ async fn directory_tree_to_loader_tree(
                         default: Some(default),
                         ..Default::default()
                     }
-                    .cell()
                 } else {
                     // default fallback component
                     Components {
@@ -1030,11 +1064,9 @@ async fn directory_tree_to_loader_tree(
                         ),
                         ..Default::default()
                     }
-                    .cell()
                 },
                 global_metadata,
-            }
-            .cell(),
+            },
         );
     }
 
@@ -1046,7 +1078,7 @@ async fn directory_tree_to_loader_tree(
             .move_index(tree.parallel_routes.len() - 1, 0);
     }
 
-    Ok(Vc::cell(Some(tree.cell())))
+    Ok(Some(tree))
 }
 
 #[turbo_tasks::function]
@@ -1085,7 +1117,7 @@ async fn directory_tree_to_entrypoints_internal_untraced(
     let directory_tree = &*directory_tree.await?;
 
     let subdirectories = &directory_tree.subdirectories;
-    let components = directory_tree.components.await?.clone_value();
+    let components = &directory_tree.components;
     // Route can have its own segment config, also can inherit from the layout root
     // segment config. https://nextjs.org/docs/app/building-your-application/rendering/edge-and-nodejs-runtimes#segment-runtime-option
     // Pass down layouts from each tree to apply segment config when adding route.
@@ -1115,8 +1147,7 @@ async fn directory_tree_to_entrypoints_internal_untraced(
             &mut result,
             app_page.complete(PageType::Page)?,
             loader_tree.context("loader tree should be created for a page/default")?,
-        )
-        .await?;
+        );
     }
 
     if let Some(route) = components.route {
@@ -1192,24 +1223,24 @@ async fn directory_tree_to_entrypoints_internal_untraced(
                                 components: Components {
                                     page: components.not_found.or_else(|| Some(get_next_package(app_dir).join("dist/client/components/not-found-error.js".into()))),
                                     ..Default::default()
-                                }.cell(),
+                                },
                                 global_metadata
-                            }.cell()
+                            }
                         },
-                        components: Components::default().cell(),
+                        components: Components::default(),
                         global_metadata,
-                    }.cell(),
+                    },
                 },
-                components: components.without_leafs().cell(),
+                components: components.without_leafs(),
                 global_metadata,
-            }
-            .cell();
+            }.cell();
 
         {
             let app_page = app_page
                 .clone_push_str("_not-found")?
                 .complete(PageType::Page)?;
-            add_app_page(app_dir, &mut result, app_page, not_found_tree).await?;
+
+            add_app_page(app_dir, &mut result, app_page, not_found_tree);
         }
     }
 
@@ -1290,8 +1321,7 @@ async fn directory_tree_to_entrypoints_internal_untraced(
                             page.clone(),
                             loader_tree
                                 .context("loader tree should be created for a page/default")?,
-                        )
-                        .await?;
+                        );
                     }
                 }
                 Entrypoint::AppRoute {
