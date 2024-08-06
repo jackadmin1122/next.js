@@ -628,9 +628,23 @@ export type PostQueryResult = {
     } | null;
   } | null;
 } | null;
-// Source: ./app/(blog)/posts/[slug]/page.tsx
+import "@sanity/client";
+declare module "@sanity/client" {
+  interface SanityQueries {
+    '*[_type == "settings"][0]': SettingsQueryResult;
+    '*[_type == "post" && defined(slug.current)] | order(date desc, _updatedAt desc) [0] {\n  content,\n  \n  _id,\n  "status": select(_originalId in path("drafts.**") => "draft", "published"),\n  "title": coalesce(title, "Untitled"),\n  "slug": slug.current,\n  excerpt,\n  coverImage,\n  "date": coalesce(date, _updatedAt),\n  "author": author->{"name": coalesce(name, "Anonymous"), picture},\n\n}': HeroQueryResult;
+    '*[_type == "post" && _id != $skip && defined(slug.current)] | order(date desc, _updatedAt desc) [0...$limit] {\n  \n  _id,\n  "status": select(_originalId in path("drafts.**") => "draft", "published"),\n  "title": coalesce(title, "Untitled"),\n  "slug": slug.current,\n  excerpt,\n  coverImage,\n  "date": coalesce(date, _updatedAt),\n  "author": author->{"name": coalesce(name, "Anonymous"), picture},\n\n}': MoreStoriesQueryResult;
+    '*[_type == "post" && slug.current == $slug] [0] {\n  content,\n  \n  _id,\n  "status": select(_originalId in path("drafts.**") => "draft", "published"),\n  "title": coalesce(title, "Untitled"),\n  "slug": slug.current,\n  excerpt,\n  coverImage,\n  "date": coalesce(date, _updatedAt),\n  "author": author->{"name": coalesce(name, "Anonymous"), picture},\n\n}': PostQueryResult;
+  }
+} // Source: ./app/(blog)/posts/[slug]/page.tsx
 // Variable: postSlugs
-// Query: *[_type == "post"]{slug}
+// Query: *[_type == "post" && defined(slug.current)]{"slug": slug.current}
 export type PostSlugsResult = Array<{
-  slug: Slug | null;
+  slug: string | null;
 }>;
+import "@sanity/client";
+declare module "@sanity/client" {
+  interface SanityQueries {
+    '*[_type == "post" && defined(slug.current)]{"slug": slug.current}': PostSlugsResult;
+  }
+}
