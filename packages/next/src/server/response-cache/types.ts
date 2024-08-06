@@ -84,6 +84,7 @@ export interface CachedRouteValue {
 export interface CachedImageValue {
   kind: 'IMAGE'
   etag: string
+  upstreamEtag: string
   buffer: Buffer
   extension: string
   isMiss?: boolean

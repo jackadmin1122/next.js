@@ -15,7 +15,9 @@ import type { NextConfigComplete } from './config-shared'
 import { createRequestResponseMocks } from './lib/mock-request'
 import type { NextUrlWithParsedQuery } from './request-meta'
 import type {
+  CachedImageValue,
   IncrementalCacheEntry,
+  IncrementalCacheItem,
   IncrementalCacheValue,
 } from './response-cache'
 import { sendEtagResponse } from './send-payload'
@@ -34,7 +36,7 @@ const SVG = 'image/svg+xml'
 const ICO = 'image/x-icon'
 const TIFF = 'image/tiff'
 const BMP = 'image/bmp'
-const CACHE_VERSION = 3
+const CACHE_VERSION = 4
 const ANIMATABLE_TYPES = [WEBP, PNG, GIF]
 const VECTOR_TYPES = [SVG]
 const BLUR_IMG_SIZE = 8 // should match `next-image-loader`
@@ -83,6 +85,7 @@ interface ImageUpstream {
   buffer: Buffer
   contentType: string | null | undefined
   cacheControl: string | null | undefined
+  etag: string
 }
 
 function getSupportedMimeType(options: string[], accept = ''): string {
@@ -98,8 +101,24 @@ export function getHash(items: (string | number | Buffer)[]) {
       hash.update(item)
     }
   }
-  // See https://en.wikipedia.org/wiki/Base64#Filenames
-  return hash.digest('base64').replace(/\//g, '-')
+  // See https://en.wikipedia.org/wiki/Base64#URL_applications
+  return hash.digest('base64url')
+}
+
+export function extractEtag(
+  etag: string | null | undefined,
+  imageBuffer: Buffer
+) {
+  if (!!etag) {
+    // upstream etag needs to be base64url encoded due to weak etag signature
+    // as we store this in the cache-entry file name.
+    return Buffer.from(etag).toString('base64url')
+  }
+  return getImageEtag(imageBuffer)
+}
+
+export function getImageEtag(image: Buffer) {
+  return getHash([image])
 }
 
 async function writeToCacheDir(
@@ -108,9 +127,13 @@ async function writeToCacheDir(
   maxAge: number,
   expireAt: number,
   buffer: Buffer,
-  etag: string
+  etag: string,
+  upstreamEtag: string
 ) {
-  const filename = join(dir, `${maxAge}.${expireAt}.${etag}.${extension}`)
+  const filename = join(
+    dir,
+    `${maxAge}.${expireAt}.${etag}.${upstreamEtag}.${extension}`
+  )
 
   await promises.rm(dir, { recursive: true, force: true }).catch(() => {})
 
@@ -347,7 +370,8 @@ export class ImageOptimizerCache {
       const now = Date.now()
 
       for (const file of files) {
-        const [maxAgeSt, expireAtSt, etag, extension] = file.split('.', 4)
+        const [maxAgeSt, expireAtSt, etag, upstreamEtag, extension] =
+          file.split('.', 5)
         const buffer = await promises.readFile(join(cacheDir, file))
         const expireAt = Number(expireAtSt)
         const maxAge = Number(maxAgeSt)
@@ -358,6 +382,7 @@ export class ImageOptimizerCache {
             etag,
             buffer,
             extension,
+            upstreamEtag,
           },
           revalidateAfter:
             Math.max(maxAge, this.nextConfig.images.minimumCacheTTL) * 1000 +
@@ -398,7 +423,8 @@ export class ImageOptimizerCache {
         revalidate,
         expireAt,
         value.buffer,
-        value.etag
+        value.etag,
+        value.upstreamEtag
       )
     } catch (err) {
       Log.error(`Failed to write image to cache ${cacheKey}`, err)
@@ -451,6 +477,21 @@ export function getMaxAge(str: string | null | undefined): number {
     }
   }
   return 0
+}
+
+export function shouldUsePreviouslyCachedEntry(
+  upstreamImage: ImageUpstream,
+  previousCacheEntry: IncrementalCacheItem | undefined
+): previousCacheEntry is NonNullable<IncrementalCacheItem> & {
+  value: CachedImageValue
+} {
+  return (
+    previousCacheEntry?.value?.kind === 'IMAGE' &&
+    // If the cached image is optimized
+    previousCacheEntry.value.upstreamEtag !== previousCacheEntry.value.etag &&
+    // and the upstream etag is the same as the previous cache entry's
+    upstreamImage.etag === previousCacheEntry.value.upstreamEtag
+  )
 }
 
 export async function optimizeImage({
@@ -523,8 +564,8 @@ export async function fetchExternalImage(href: string): Promise<ImageUpstream> {
   const buffer = Buffer.from(await res.arrayBuffer())
   const contentType = res.headers.get('Content-Type')
   const cacheControl = res.headers.get('Cache-Control')
-
-  return { buffer, contentType, cacheControl }
+  const etag = extractEtag(res.headers.get('ETag'), buffer)
+  return { buffer, contentType, cacheControl, etag }
 }
 
 export async function fetchInternalImage(
@@ -559,7 +600,9 @@ export async function fetchInternalImage(
     const buffer = Buffer.concat(mocked.res.buffers)
     const contentType = mocked.res.getHeader('Content-Type')
     const cacheControl = mocked.res.getHeader('Cache-Control')
-    return { buffer, contentType, cacheControl }
+    const etag = extractEtag(mocked.res.getHeader('ETag'), buffer)
+
+    return { buffer, contentType, cacheControl, etag }
   } catch (err) {
     Log.error('upstream image response failed for', href, err)
     throw new ImageError(
@@ -581,11 +624,30 @@ export async function imageOptimizer(
       'dangerouslyAllowSVG' | 'minimumCacheTTL'
     >
   },
-  isDev: boolean | undefined
-): Promise<{ buffer: Buffer; contentType: string; maxAge: number }> {
+  isDev: boolean | undefined,
+  previousCacheEntry?: IncrementalCacheItem
+): Promise<{
+  buffer: Buffer
+  contentType: string
+  maxAge: number
+  etag: string
+  upstreamEtag: string
+}> {
   const { href, quality, width, mimeType } = paramsResult
-  const upstreamBuffer = imageUpstream.buffer
+  const { buffer: upstreamBuffer, etag: upstreamEtag } = imageUpstream
   const maxAge = getMaxAge(imageUpstream.cacheControl)
+
+  if (shouldUsePreviouslyCachedEntry(imageUpstream, previousCacheEntry)) {
+    // Return the cached optimized image
+    return {
+      buffer: previousCacheEntry.value.buffer,
+      contentType: paramsResult.mimeType,
+      maxAge: previousCacheEntry.curRevalidate || maxAge,
+      etag: previousCacheEntry.value.etag,
+      upstreamEtag: previousCacheEntry.value.upstreamEtag,
+    }
+  }
+
   const upstreamType =
     detectContentType(upstreamBuffer) ||
     imageUpstream.contentType?.toLowerCase().trim()
@@ -603,18 +665,29 @@ export async function imageOptimizer(
         '"url" parameter is valid but image type is not allowed'
       )
     }
-
     if (ANIMATABLE_TYPES.includes(upstreamType) && isAnimated(upstreamBuffer)) {
       Log.warnOnce(
         `The requested resource "${href}" is an animated image so it will not be optimized. Consider adding the "unoptimized" property to the <Image>.`
       )
-      return { buffer: upstreamBuffer, contentType: upstreamType, maxAge }
+      return {
+        buffer: upstreamBuffer,
+        contentType: upstreamType,
+        maxAge,
+        etag: upstreamEtag,
+        upstreamEtag,
+      }
     }
     if (VECTOR_TYPES.includes(upstreamType)) {
       // We don't warn here because we already know that "dangerouslyAllowSVG"
       // was enabled above, therefore the user explicitly opted in.
       // If we add more VECTOR_TYPES besides SVG, perhaps we could warn for those.
-      return { buffer: upstreamBuffer, contentType: upstreamType, maxAge }
+      return {
+        buffer: upstreamBuffer,
+        contentType: upstreamType,
+        maxAge,
+        etag: upstreamEtag,
+        upstreamEtag,
+      }
     }
     if (!upstreamType.startsWith('image/') || upstreamType.includes(',')) {
       Log.error(
@@ -668,6 +741,8 @@ export async function imageOptimizer(
         buffer: optimizedBuffer,
         contentType,
         maxAge: Math.max(maxAge, nextConfig.images.minimumCacheTTL),
+        etag: getImageEtag(optimizedBuffer),
+        upstreamEtag,
       }
     } else {
       throw new ImageError(500, 'Unable to optimize buffer')
@@ -679,6 +754,8 @@ export async function imageOptimizer(
         buffer: upstreamBuffer,
         contentType: upstreamType,
         maxAge: nextConfig.images.minimumCacheTTL,
+        etag: upstreamEtag,
+        upstreamEtag,
       }
     } else {
       throw new ImageError(
@@ -749,6 +826,7 @@ export function sendResponse(
   url: string,
   extension: string,
   buffer: Buffer,
+  etag: string,
   isStatic: boolean,
   xCache: XCacheHeader,
   imagesConfig: ImageConfigComplete,
@@ -756,7 +834,6 @@ export function sendResponse(
   isDev: boolean
 ) {
   const contentType = getContentType(extension)
-  const etag = getHash([buffer])
   const result = setResponseHeaders(
     req,
     res,
