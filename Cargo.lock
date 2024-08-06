@@ -8402,6 +8402,7 @@ dependencies = [
  "turbo-tasks",
  "turbo-tasks-build",
  "turbo-tasks-fs",
+ "turbo-tasks-memory",
  "turbo-tasks-testing",
  "turbopack-core",
 ]
@@ -8483,6 +8484,7 @@ dependencies = [
  "trybuild",
  "turbo-tasks",
  "turbo-tasks-build",
+ "turbo-tasks-memory",
  "turbo-tasks-testing",
 ]
 

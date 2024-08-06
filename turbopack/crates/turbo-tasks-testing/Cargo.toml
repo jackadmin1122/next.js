@@ -5,6 +5,7 @@ description = "TBD"
 license = "MPL-2.0"
 edition = "2021"
 autobenches = false
+autotests = false
 
 [lib]
 bench = false
