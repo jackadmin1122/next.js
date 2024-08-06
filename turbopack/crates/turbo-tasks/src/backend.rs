@@ -23,19 +23,9 @@ use crate::{
     task::shared_reference::TypedSharedReference,
     trait_helpers::{get_trait_method, has_trait, traits},
     triomphe_utils::unchecked_sidecast_triomphe_arc,
-    FunctionId, RawVc, ReadRef, SharedReference, TaskId, TaskIdProvider, TaskIdSet, TraitRef,
-    TraitTypeId, ValueTypeId, VcRead, VcValueTrait, VcValueType,
+    FunctionId, RawVc, ReadRef, SharedReference, TaskId, TaskIdSet, TraitRef, TraitTypeId,
+    ValueTypeId, VcRead, VcValueTrait, VcValueType,
 };
-
-pub enum TaskType {
-    /// Tasks that only exist for a certain operation and
-    /// won't persist between sessions
-    Transient(TransientTaskType),
-
-    /// Tasks that can persist between sessions and potentially
-    /// shared globally
-    Persistent(PersistentTaskType),
-}
 
 type TransientTaskRoot =
     Box<dyn Fn() -> Pin<Box<dyn Future<Output = Result<RawVc>> + Send>> + Send + Sync>;
@@ -67,7 +57,7 @@ impl Debug for TransientTaskType {
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
-pub enum PersistentTaskType {
+pub enum CachedTaskType {
     /// A normal task execution a native (rust) function
     Native {
         fn_type: FunctionId,
@@ -95,7 +85,7 @@ pub enum PersistentTaskType {
     },
 }
 
-impl Display for PersistentTaskType {
+impl Display for CachedTaskType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.get_name())
     }
@@ -144,7 +134,7 @@ mod ser {
                 type Value = FunctionAndArg<'de>;
 
                 fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                    write!(formatter, "a valid PersistentTaskType")
+                    write!(formatter, "a valid CachedTaskType")
                 }
 
                 fn visit_seq<A>(self, mut seq: A) -> std::result::Result<Self::Value, A::Error>
@@ -167,13 +157,13 @@ mod ser {
         }
     }
 
-    impl Serialize for PersistentTaskType {
+    impl Serialize for CachedTaskType {
         fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
         where
             S: ser::Serializer,
         {
             match self {
-                PersistentTaskType::Native { fn_type, this, arg } => {
+                CachedTaskType::Native { fn_type, this, arg } => {
                     let mut s = serializer.serialize_seq(Some(3))?;
                     s.serialize_element::<u8>(&0)?;
                     s.serialize_element(&FunctionAndArg::Borrowed {
@@ -183,7 +173,7 @@ mod ser {
                     s.serialize_element(this)?;
                     s.end()
                 }
-                PersistentTaskType::ResolveNative { fn_type, this, arg } => {
+                CachedTaskType::ResolveNative { fn_type, this, arg } => {
                     let mut s = serializer.serialize_seq(Some(3))?;
                     s.serialize_element::<u8>(&1)?;
                     s.serialize_element(&FunctionAndArg::Borrowed {
@@ -193,7 +183,7 @@ mod ser {
                     s.serialize_element(this)?;
                     s.end()
                 }
-                PersistentTaskType::ResolveTrait {
+                CachedTaskType::ResolveTrait {
                     trait_type,
                     method_name,
                     this,
@@ -218,14 +208,14 @@ mod ser {
         }
     }
 
-    impl<'de> Deserialize<'de> for PersistentTaskType {
+    impl<'de> Deserialize<'de> for CachedTaskType {
         fn deserialize<D: ser::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
             struct Visitor;
             impl<'de> serde::de::Visitor<'de> for Visitor {
-                type Value = PersistentTaskType;
+                type Value = CachedTaskType;
 
                 fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                    write!(formatter, "a valid PersistentTaskType")
+                    write!(formatter, "a valid CachedTaskType")
                 }
 
                 fn visit_seq<A>(self, mut seq: A) -> std::result::Result<Self::Value, A::Error>
@@ -246,7 +236,7 @@ mod ser {
                             let this = seq
                                 .next_element()?
                                 .ok_or_else(|| serde::de::Error::invalid_length(2, &self))?;
-                            Ok(PersistentTaskType::Native { fn_type, this, arg })
+                            Ok(CachedTaskType::Native { fn_type, this, arg })
                         }
                         1 => {
                             let FunctionAndArg::Owned { fn_type, arg } = seq
@@ -258,7 +248,7 @@ mod ser {
                             let this = seq
                                 .next_element()?
                                 .ok_or_else(|| serde::de::Error::invalid_length(2, &self))?;
-                            Ok(PersistentTaskType::ResolveNative { fn_type, this, arg })
+                            Ok(CachedTaskType::ResolveNative { fn_type, this, arg })
                         }
                         2 => {
                             let trait_type = seq
@@ -278,7 +268,7 @@ mod ser {
                             let arg = seq
                                 .next_element_seed(method.arg_deserializer)?
                                 .ok_or_else(|| serde::de::Error::invalid_length(3, &self))?;
-                            Ok(PersistentTaskType::ResolveTrait {
+                            Ok(CachedTaskType::ResolveTrait {
                                 trait_type,
                                 method_name,
                                 this,
@@ -294,7 +284,7 @@ mod ser {
     }
 }
 
-impl PersistentTaskType {
+impl CachedTaskType {
     /// Returns the name of the function in the code. Trait methods are
     /// formatted as `TraitName::method_name`.
     ///
@@ -302,17 +292,17 @@ impl PersistentTaskType {
     /// it can return a `&'static str` in many cases.
     pub fn get_name(&self) -> Cow<'static, str> {
         match self {
-            PersistentTaskType::Native {
+            CachedTaskType::Native {
                 fn_type: native_fn,
                 this: _,
                 arg: _,
             }
-            | PersistentTaskType::ResolveNative {
+            | CachedTaskType::ResolveNative {
                 fn_type: native_fn,
                 this: _,
                 arg: _,
             } => Cow::Borrowed(&registry::get_function(*native_fn).name),
-            PersistentTaskType::ResolveTrait {
+            CachedTaskType::ResolveTrait {
                 trait_type: trait_id,
                 method_name: fn_name,
                 this: _,
@@ -429,7 +419,7 @@ pub type TaskCollectiblesMap = AutoMap<RawVc, i32, BuildHasherDefault<FxHasher>,
 
 pub trait Backend: Sync + Send {
     #[allow(unused_variables)]
-    fn initialize(&mut self, task_id_provider: &dyn TaskIdProvider) {}
+    fn initialize(&mut self) {}
 
     #[allow(unused_variables)]
     fn startup(&self, turbo_tasks: &dyn TurboTasksBackendApi<Self>) {}
@@ -569,7 +559,14 @@ pub trait Backend: Sync + Send {
 
     fn get_or_create_persistent_task(
         &self,
-        task_type: PersistentTaskType,
+        task_type: CachedTaskType,
+        parent_task: TaskId,
+        turbo_tasks: &dyn TurboTasksBackendApi<Self>,
+    ) -> TaskId;
+
+    fn get_or_create_transient_task(
+        &self,
+        task_type: CachedTaskType,
         parent_task: TaskId,
         turbo_tasks: &dyn TurboTasksBackendApi<Self>,
     ) -> TaskId;
@@ -598,7 +595,7 @@ pub trait Backend: Sync + Send {
     fn dispose_root_task(&self, task: TaskId, turbo_tasks: &dyn TurboTasksBackendApi<Self>);
 }
 
-impl PersistentTaskType {
+impl CachedTaskType {
     pub async fn run_resolve_native<B: Backend + 'static>(
         fn_id: FunctionId,
         mut this: Option<RawVc>,
@@ -696,7 +693,7 @@ pub(crate) mod tests {
     fn test_get_name() {
         crate::register();
         assert_eq!(
-            PersistentTaskType::Native {
+            CachedTaskType::Native {
                 fn_type: *MOCK_FUNC_TASK_FUNCTION_ID,
                 this: None,
                 arg: Box::new(()),
@@ -705,7 +702,7 @@ pub(crate) mod tests {
             "mock_func_task",
         );
         assert_eq!(
-            PersistentTaskType::ResolveTrait {
+            CachedTaskType::ResolveTrait {
                 trait_type: *MOCKTRAIT_TRAIT_TYPE_ID,
                 method_name: "mock_method_task".into(),
                 this: RawVc::TaskOutput(unsafe { TaskId::new_unchecked(1) }),
