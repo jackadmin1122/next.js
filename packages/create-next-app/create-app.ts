@@ -37,6 +37,7 @@ export async function createApp({
   skipInstall,
   empty,
   turbo,
+  api,
 }: {
   appPath: string
   packageManager: PackageManager
@@ -51,10 +52,19 @@ export async function createApp({
   skipInstall: boolean
   empty: boolean
   turbo: boolean
+  api?: boolean
 }): Promise<void> {
   let repoInfo: RepoInfo | undefined
   const mode: TemplateMode = typescript ? 'ts' : 'js'
-  const template: TemplateType = `${app ? 'app' : 'default'}${tailwind ? '-tw' : ''}${empty ? '-empty' : ''}`
+  const template: TemplateType = api
+    ? 'app-api'
+    : `${app ? 'app' : 'default'}${tailwind ? '-tw' : ''}${empty ? '-empty' : ''}`
+
+  // Disable tailwind and eslint for API template
+  if (api) {
+    tailwind = false
+    eslint = false
+  }
 
   if (example) {
     let repoUrl: URL | undefined
