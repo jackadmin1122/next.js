@@ -71,7 +71,6 @@ async function exportPageImpl(
     enableExperimentalReact,
     ampValidatorPath,
     trailingSlash,
-    enabledDirectories,
   } = input
 
   if (enableExperimentalReact) {
@@ -231,7 +230,6 @@ async function exportPageImpl(
             fetchCacheKeyPrefix,
             distDir,
             dir,
-            enabledDirectories,
             // skip writing to disk in minimal mode for now, pending some
             // changes to better support it
             flushToDisk: !hasNextSupport,

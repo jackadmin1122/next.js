@@ -18,7 +18,11 @@ import type {
   RequestAsyncStorage,
   RequestStore,
 } from '../../client/components/request-async-storage.external'
-import type { CachedFetchData } from '../response-cache'
+import {
+  CachedRouteKind,
+  IncrementalCacheKind,
+  type CachedFetchData,
+} from '../response-cache'
 
 const isEdgeRuntime = process.env.NEXT_RUNTIME === 'edge'
 
@@ -598,7 +602,7 @@ function createPatchedFetcher(
                   await staticGenerationStore.incrementalCache.set(
                     cacheKey,
                     {
-                      kind: 'FETCH',
+                      kind: CachedRouteKind.FETCH,
                       data: cachedFetchData,
                       revalidate: normalizedRevalidate,
                     },
@@ -651,7 +655,7 @@ function createPatchedFetcher(
             const entry = staticGenerationStore.isOnDemandRevalidate
               ? null
               : await staticGenerationStore.incrementalCache.get(cacheKey, {
-                  kindHint: 'fetch',
+                  kind: IncrementalCacheKind.FETCH,
                   revalidate: finalRevalidate,
                   fetchUrl,
                   fetchIdx,
@@ -666,7 +670,7 @@ function createPatchedFetcher(
               cacheReasonOverride = 'cache-control: no-cache (hard refresh)'
             }
 
-            if (entry?.value && entry.value.kind === 'FETCH') {
+            if (entry?.value && entry.value.kind === CachedRouteKind.FETCH) {
               // when stale and is revalidating we wait for fresh data
               // so the revalidated entry has the updated data
               if (staticGenerationStore.isRevalidate && entry.isStale) {

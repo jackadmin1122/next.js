@@ -562,7 +562,6 @@ export async function exportAppImpl(
               fetchCacheKeyPrefix: nextConfig.experimental.fetchCacheKeyPrefix,
               cacheHandler: nextConfig.cacheHandler,
               enableExperimentalReact: needsExperimentalReact(nextConfig),
-              enabledDirectories,
             })
           })
 

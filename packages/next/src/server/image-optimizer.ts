@@ -14,9 +14,10 @@ import { hasMatch } from '../shared/lib/match-remote-pattern'
 import type { NextConfigComplete } from './config-shared'
 import { createRequestResponseMocks } from './lib/mock-request'
 import type { NextUrlWithParsedQuery } from './request-meta'
-import type {
-  IncrementalCacheEntry,
-  IncrementalCacheValue,
+import {
+  CachedRouteKind,
+  type IncrementalCacheEntry,
+  type IncrementalCacheValue,
 } from './response-cache'
 import { sendEtagResponse } from './send-payload'
 import { getContentType, getExtension } from './serve-static'
@@ -354,7 +355,7 @@ export class ImageOptimizerCache {
 
         return {
           value: {
-            kind: 'IMAGE',
+            kind: CachedRouteKind.IMAGE,
             etag,
             buffer,
             extension,
@@ -380,7 +381,7 @@ export class ImageOptimizerCache {
       revalidate?: number | false
     }
   ) {
-    if (value?.kind !== 'IMAGE') {
+    if (value?.kind !== CachedRouteKind.IMAGE) {
       throw new Error('invariant attempted to set non-image to image-cache')
     }
 

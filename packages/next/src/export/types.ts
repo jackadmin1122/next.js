@@ -66,7 +66,6 @@ export interface ExportPageInput {
   fetchCacheKeyPrefix?: string
   nextConfigOutput?: NextConfigComplete['output']
   enableExperimentalReact?: boolean
-  enabledDirectories: NextEnabledDirectories
 }
 
 export type ExportedPageFile = {
