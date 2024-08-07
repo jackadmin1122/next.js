@@ -196,6 +196,7 @@ export function unstable_cache<T extends Callback>(
           softTags: implicitTags,
           fetchIdx,
           fetchUrl,
+          isFallback: undefined,
         })
 
         if (cacheEntry && cacheEntry.value) {
@@ -309,6 +310,7 @@ export function unstable_cache<T extends Callback>(
           fetchIdx,
           fetchUrl,
           softTags: implicitTags,
+          isFallback: undefined,
         })
 
         if (cacheEntry && cacheEntry.value) {

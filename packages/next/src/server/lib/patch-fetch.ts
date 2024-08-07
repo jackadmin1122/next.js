@@ -661,6 +661,7 @@ function createPatchedFetcher(
                   fetchIdx,
                   tags,
                   softTags: implicitTags,
+                  isFallback: undefined,
                 })
 
             if (entry) {
