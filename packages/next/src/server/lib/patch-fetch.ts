@@ -19,6 +19,7 @@ import type {
   RequestStore,
 } from '../../client/components/request-async-storage.external'
 import type { CachedFetchData } from '../response-cache'
+import type { PrerenderAsyncStorage } from '../app-render/prerender-async-storage.external'
 
 const isEdgeRuntime = process.env.NEXT_RUNTIME === 'edge'
 
@@ -198,11 +199,16 @@ function trackFetchMetric(
 interface PatchableModule {
   staticGenerationAsyncStorage: StaticGenerationAsyncStorage
   requestAsyncStorage: RequestAsyncStorage
+  prerenderAsyncStorage: PrerenderAsyncStorage
 }
 
 function createPatchedFetcher(
   originFetch: Fetcher,
-  { staticGenerationAsyncStorage, requestAsyncStorage }: PatchableModule
+  {
+    staticGenerationAsyncStorage,
+    requestAsyncStorage,
+    prerenderAsyncStorage,
+  }: PatchableModule
 ): PatchedFetcher {
   // Create the patched fetch function. We don't set the type here, as it's
   // verified as the return value of this function.
@@ -228,7 +234,9 @@ function createPatchedFetcher(
     const isInternal = (init?.next as any)?.internal === true
     const hideSpan = process.env.NEXT_OTEL_FETCH_DISABLED === '1'
 
-    return getTracer().trace(
+    const staticGenerationStore = staticGenerationAsyncStorage.getStore()
+
+    const result = getTracer().trace(
       isInternal ? NextNodeServerSpan.internalFetch : AppRenderSpan.fetch,
       {
         hideSpan,
@@ -247,7 +255,6 @@ function createPatchedFetcher(
           return originFetch(input, init)
         }
 
-        const staticGenerationStore = staticGenerationAsyncStorage.getStore()
         const requestStore = requestAsyncStorage.getStore()
 
         // If the staticGenerationStore is not available, we can't do any
@@ -575,7 +582,7 @@ function createPatchedFetcher(
             }
             if (
               res.status === 200 &&
-              staticGenerationStore.incrementalCache &&
+              incrementalCache &&
               cacheKey &&
               (isCacheableRevalidate || requestStore?.serverComponentsHmrCache)
             ) {
@@ -631,7 +638,8 @@ function createPatchedFetcher(
         let isForegroundRevalidate = false
         let isHmrRefreshCache = false
 
-        if (cacheKey && staticGenerationStore.incrementalCache) {
+        const incrementalCache = staticGenerationStore.incrementalCache
+        if (cacheKey && incrementalCache) {
           let cachedFetchData: CachedFetchData | undefined
 
           if (
@@ -785,6 +793,20 @@ function createPatchedFetcher(
         }
       }
     )
+
+    const prerenderStore = prerenderAsyncStorage.getStore()
+    if (prerenderStore && prerenderStore.cacheSignal) {
+      // During static generation we track cache reads so we can reason about when they fill
+      const cacheSignal = prerenderStore.cacheSignal
+      cacheSignal.beginRead()
+      try {
+        return await result
+      } finally {
+        cacheSignal.endRead()
+      }
+    } else {
+      return result
+    }
   }
 
   // Attach the necessary properties to the patched fetch function.

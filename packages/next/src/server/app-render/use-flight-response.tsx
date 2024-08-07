@@ -4,6 +4,9 @@ import type { BinaryStreamOf } from './app-render'
 import { htmlEscapeJsonString } from '../htmlescape'
 import type { DeepReadonly } from '../../shared/lib/deep-readonly'
 
+import { prerenderAsyncStorage } from './prerender-async-storage.external'
+import { CacheSignal } from './cache-signal'
+
 const isEdgeRuntime = process.env.NEXT_RUNTIME === 'edge'
 
 const INLINE_FLIGHT_PAYLOAD_BOOTSTRAP = 0
@@ -55,28 +58,6 @@ export function useFlightStream<T>(
   flightResponses.set(flightStream, newResponse)
 
   return newResponse
-}
-
-/**
- * There are times when an SSR render may be finished but the RSC render
- * is ongoing and we need to wait for it to complete to make some determination
- * about how to handle the render. This function will drain the RSC reader and
- * resolve when completed. This will generally require teeing the RSC stream and it
- * should be noted that it will cause all the RSC chunks to queue in the underlying
- * ReadableStream however given Flight currently is a push stream that doesn't respond
- * to backpressure this shouldn't change how much memory is maximally consumed
- */
-export async function flightRenderComplete(
-  flightStream: ReadableStream<Uint8Array>
-): Promise<void> {
-  const flightReader = flightStream.getReader()
-
-  while (true) {
-    const { done } = await flightReader.read()
-    if (done) {
-      return
-    }
-  }
 }
 
 /**
@@ -150,15 +131,25 @@ function writeInitialInstructions(
   scriptStart: string,
   formState: unknown | null
 ) {
-  controller.enqueue(
-    encoder.encode(
-      `${scriptStart}(self.__next_f=self.__next_f||[]).push(${htmlEscapeJsonString(
-        JSON.stringify([INLINE_FLIGHT_PAYLOAD_BOOTSTRAP])
-      )});self.__next_f.push(${htmlEscapeJsonString(
-        JSON.stringify([INLINE_FLIGHT_PAYLOAD_FORM_STATE, formState])
-      )})</script>`
+  if (formState != null) {
+    controller.enqueue(
+      encoder.encode(
+        `${scriptStart}(self.__next_f=self.__next_f||[]).push(${htmlEscapeJsonString(
+          JSON.stringify([INLINE_FLIGHT_PAYLOAD_BOOTSTRAP])
+        )});self.__next_f.push(${htmlEscapeJsonString(
+          JSON.stringify([INLINE_FLIGHT_PAYLOAD_FORM_STATE, formState])
+        )})</script>`
+      )
     )
-  )
+  } else {
+    controller.enqueue(
+      encoder.encode(
+        `${scriptStart}(self.__next_f=self.__next_f||[]).push(${htmlEscapeJsonString(
+          JSON.stringify([INLINE_FLIGHT_PAYLOAD_BOOTSTRAP])
+        )})</script>`
+      )
+    )
+  }
 }
 
 function writeFlightDataInstruction(
@@ -188,4 +179,39 @@ function writeFlightDataInstruction(
       `${scriptStart}self.__next_f.push(${htmlInlinedData})</script>`
     )
   )
+}
+
+export async function warmFlightResponse(
+  flightStream: BinaryStreamOf<any>,
+  clientReferenceManifest: DeepReadonly<ClientReferenceManifest>
+) {
+  let createFromReadableStream
+  if (process.env.TURBOPACK) {
+    createFromReadableStream =
+      // eslint-disable-next-line import/no-extraneous-dependencies
+      require('react-server-dom-turbopack/client.edge').createFromReadableStream
+  } else {
+    createFromReadableStream =
+      // eslint-disable-next-line import/no-extraneous-dependencies
+      require('react-server-dom-webpack/client.edge').createFromReadableStream
+  }
+
+  const cacheSignal = new CacheSignal()
+  const moduleWarmpupStore = {
+    cacheSignal,
+    controller: null,
+    dynamicTracking: null,
+  }
+  prerenderAsyncStorage.run(
+    moduleWarmpupStore,
+    createFromReadableStream,
+    flightStream,
+    {
+      ssrManifest: {
+        moduleLoading: clientReferenceManifest.moduleLoading,
+        moduleMap: clientReferenceManifest.ssrModuleMapping,
+      },
+    }
+  )
+  await cacheSignal.cacheReady()
 }
